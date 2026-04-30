@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>蛇族幻想 - 第六關：真神審判 (截圖風格更新)</title>
+    <style>
+        :root { --gold: #d4af37; --void-bg: #05010a; --holy-blue: #00d2ff; --death-red: rgba(139, 0, 0, 0.85); }
+        body, html { margin: 0; padding: 0; background: var(--void-bg); overflow: hidden; font-family: "Noto Serif TC", serif; }
+        canvas { display: block; }
+        
+        /* UI 層級 */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        .status-window { position: absolute; background: rgba(0, 0, 0, 0.9); border: 2px solid var(--gold); padding: 15px; color: #fff; box-shadow: 0 0 30px rgba(212,175,55,0.3); }
+        #player-status { top: 20px; right: 20px; width: 280px; text-align: right; }
+        .hp-bar-bg { width: 100%; height: 16px; background: #111; margin-top: 10px; border: 1px solid var(--gold); overflow: hidden; }
+        #hp-fill { height: 100%; background: linear-gradient(90deg, var(--gold), #fff, var(--gold)); width: 100%; transition: 0.1s; }
+        
+        /* 死亡畫面 (依照截圖樣式) */
+        #death-screen { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            background: var(--death-red); display: none; flex-direction: column; 
+            justify-content: center; align-items: center; z-index: 100; pointer-events: auto;
+        }
+        #death-screen h1 { color: #fff; font-size: 72px; letter-spacing: 10px; margin-bottom: 30px; text-shadow: 0 0 20px #000; }
+        .respawn-btn { 
+            background: #fff; color: #000; border: none; padding: 12px 40px; 
+            font-size: 20px; font-weight: bold; cursor: pointer; transition: 0.3s;
+        }
+        .respawn-btn:hover { background: #ccc; transform: scale(1.05); }
+
+        #msg-overlay { position: absolute; bottom: 80px; width: 100%; text-align: center; color: #fff; font-size: 28px; font-weight: bold; opacity: 0; transition: 0.3s; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="ui-layer">
+        <div id="player-status" class="status-window">
+            <div style="font-size: 20px; letter-spacing: 2px; font-weight: bold;">真神・冒險者</div>
+            <div class="hp-bar-bg"><div id="hp-fill"></div></div>
+            <div id="potion-count" style="color:var(--holy-blue); margin-top:8px; font-weight:bold;">🧪 聖水存量: 99 (按 E 使用)</div>
+        </div>
+        <div id="msg-overlay"></div>
+    </div>
+
+    <div id="death-screen">
+        <h1>你倒下了...</h1>
+        <button class="respawn-btn" onclick="location.reload()">回到起點 (保留裝備)</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const config = { tileSize: 80, playerSpeed: 0.09, bulletSpeed: 0.55, shootCooldown: 160 };
+
+        const player = { x: 20, y: 15, hp: 999, maxHp: 999, potions: 99, holyTimer: 0, hitTimer: 0, dead: false };
+        const snakes = [];
+        const bullets = [];
+        const backgroundStars = [];
+        const keys = {};
+        let portalOpen = false;
+        let transitioning = false;
+
+        const mapW = 40, mapH = 30;
+        const centerX = 20, centerY = 15, arenaRadius = 12;
+
+        for(let i=0; i<80; i++) backgroundStars.push({ x: Math.random() * mapW, y: Math.random() * mapH, s: Math.random() * 2 + 1, alpha: Math.random(), speed: Math.random() * 0.005 });
+
+        const pillars = [];
+        for(let i=0; i<12; i++) {
+            const angle = (i / 12) * Math.PI * 2;
+            pillars.push({ x: centerX + Math.cos(angle) * arenaRadius, y: centerY + Math.sin(angle) * arenaRadius, r: 1.1 });
+        }
+
+        function checkCollision(nx, ny) {
+            if(nx < 1 || nx > mapW-1 || ny < 1 || ny > mapH-1) return true;
+            for(let p of pillars) if(Math.hypot(nx - p.x, ny - p.y) < p.r) return true;
+            if(Math.hypot(nx - centerX, ny - centerY) > arenaRadius + 2) return true;
+            return false;
+        }
+
+        [{x:12,y:7}, {x:28,y:7}, {x:12,y:23}, {x:28,y:23}].forEach(p => {
+            let s = { x: p.x, y: p.y, hp: 1600, maxHp: 1600, alive: true, hitTimer: 0, parts: [] };
+            for(let i=0; i<25; i++) s.parts.push({x: p.x, y: p.y});
+            snakes.push(s);
+        });
+
+        function showMsg(text, color = "white") {
+            const el = document.getElementById('msg-overlay');
+            el.innerText = text; el.style.color = color; el.style.opacity = 1;
+            setTimeout(() => { if(!transitioning) el.style.opacity = 0; }, 1500);
+        }
+
+        function useHolyWater() {
+            if (!player.dead && player.potions > 0 && player.hp < player.maxHp) {
+                player.potions--;
+                player.hp = Math.min(player.maxHp, player.hp + 250);
+                player.holyTimer = 40;
+                document.getElementById('potion-count').innerText = `🧪 聖水存量: ${player.potions} (按 E 使用)`;
+            }
+        }
+
+        function shoot() {
+            const now = Date.now();
+            if (now - (player.lastShootTime || 0) < config.shootCooldown) return;
+            player.lastShootTime = now;
+            for (let i = -1; i <= 1; i++) bullets.push({ x: player.x, y: player.y, vx: config.bulletSpeed, vy: i * 0.15, life: 140 });
+        }
+
+        function update() {
+            if (transitioning || player.dead) return;
+
+            // 死亡判定
+            if (player.hp <= 0) {
+                player.dead = true;
+                document.getElementById('death-screen').style.display = 'flex';
+                return;
+            }
+
+            let nx = player.x, ny = player.y;
+            if (keys['KeyW']) ny -= config.playerSpeed; if (keys['KeyS']) ny += config.playerSpeed;
+            if (keys['KeyA']) nx -= config.playerSpeed; if (keys['KeyD']) nx += config.playerSpeed;
+            if (!checkCollision(nx, player.y)) player.x = nx;
+            if (!checkCollision(player.x, ny)) player.y = ny;
+
+            if (player.holyTimer > 0) player.holyTimer--;
+            if (player.hitTimer > 0) player.hitTimer--;
+
+            if (portalOpen && Math.hypot(player.x - centerX, player.y - centerY) < 1.5) {
+                transitioning = true;
+                showMsg("即將進入最終決戰...", "#fff");
+                setTimeout(() => { window.location.href = 'finalboss.html'; }, 1500);
+            }
+
+            bullets.forEach((b, bi) => {
+                let target = null, minDist = 18;
+                snakes.forEach(s => {
+                    if(!s.alive) return;
+                    let d = Math.hypot(s.parts[0].x - b.x, s.parts[0].y - b.y);
+                    if(d < minDist) { minDist = d; target = s; }
+                });
+                if(target) {
+                    let targetAngle = Math.atan2(target.parts[0].y - b.y, target.parts[0].x - b.x);
+                    let currentAngle = Math.atan2(b.vy, b.vx);
+                    let diff = targetAngle - currentAngle;
+                    while(diff < -Math.PI) diff += Math.PI*2;
+                    while(diff > Math.PI) diff -= Math.PI*2;
+                    b.vx = Math.cos(currentAngle + diff * 0.22) * config.bulletSpeed;
+                    b.vy = Math.sin(currentAngle + diff * 0.22) * config.bulletSpeed;
+                }
+                b.x += b.vx; b.y += b.vy; b.life--;
+                snakes.forEach(s => {
+                    if(s.alive && Math.hypot(b.x - s.parts[0].x, b.y - s.parts[0].y) < 1.3) {
+                        s.hp -= 40; s.hitTimer = 5;
+                        bullets.splice(bi, 1);
+                        if(s.hp <= 0) s.alive = false;
+                    }
+                });
+                if(b.life <= 0 || checkCollision(b.x, b.y)) bullets.splice(bi, 1);
+            });
+
+            let aliveCount = 0;
+            snakes.forEach(s => {
+                if(!s.alive) return; aliveCount++;
+                let head = s.parts[0];
+                let angleToPlayer = Math.atan2(player.y - head.y, player.x - head.x);
+                head.x += Math.cos(angleToPlayer) * 0.08;
+                head.y += Math.sin(angleToPlayer) * 0.08;
+                for(let i=s.parts.length-1; i>0; i--) {
+                    s.parts[i].x += (s.parts[i-1].x - s.parts[i].x) * 0.32;
+                    s.parts[i].y += (s.parts[i-1].y - s.parts[i].y) * 0.32;
+                }
+                if(Math.hypot(player.x - head.x, player.y - head.y) < 0.7) { player.hp -= 12; player.hitTimer = 6; }
+            });
+            
+            if(aliveCount === 0 && !portalOpen) {
+                portalOpen = true;
+                showMsg("傳送門已開啟，邁向終焉之路", "cyan");
+            }
+            document.getElementById('hp-fill').style.width = Math.max(0, player.hp/player.maxHp*100) + "%";
+        }
+
+        function draw() {
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            const camX = player.x * 80 - canvas.width/2, camY = player.y * 80 - canvas.height/2;
+
+            ctx.fillStyle = "#05010a"; ctx.fillRect(0,0, canvas.width, canvas.height);
+            ctx.save(); ctx.translate(-camX, -camY);
+
+            // 場地渲染
+            ctx.strokeStyle = "rgba(212, 175, 55, 0.2)"; ctx.lineWidth = 4;
+            ctx.beginPath(); ctx.arc(centerX*80+40, centerY*80+40, arenaRadius*80, 0, Math.PI*2); ctx.stroke();
+            pillars.forEach(p => {
+                ctx.fillStyle = "#151525"; ctx.beginPath(); ctx.arc(p.x*80+40, p.y*80+40, p.r*60, 0, Math.PI*2); ctx.fill();
+                ctx.strokeStyle = "#d4af37"; ctx.stroke();
+            });
+
+            if (portalOpen) {
+                ctx.save(); ctx.translate(centerX*80+40, centerY*80+40); ctx.rotate(Date.now()/400);
+                const grd = ctx.createRadialGradient(0,0,0,0,0,160);
+                grd.addColorStop(0, "white"); grd.addColorStop(0.4, "cyan"); grd.addColorStop(1, "transparent");
+                ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(0,0, 160 + Math.sin(Date.now()/150)*15, 0, Math.PI*2); ctx.fill();
+                ctx.restore();
+            }
+
+            // 蛇王
+            snakes.forEach(s => {
+                if(!s.alive) return;
+                s.parts.forEach((p, i) => {
+                    ctx.fillStyle = s.hitTimer > 0 ? "white" : `rgba(142, 68, 173, ${1 - i/s.parts.length})`;
+                    ctx.beginPath(); ctx.arc(p.x*80+40, p.y*80+40, 36 - i*1.2, 0, Math.PI*2); ctx.fill();
+                });
+            });
+
+            // 玩家 (大眼睛)
+            const px = player.x*80+40, py = player.y*80+40;
+            ctx.save(); ctx.translate(px, py);
+            let bodyColor = player.hitTimer > 0 ? "red" : (player.holyTimer > 20 ? "white" : "gold");
+            ctx.shadowBlur = 30; ctx.shadowColor = bodyColor;
+            ctx.fillStyle = bodyColor;
+            ctx.beginPath(); ctx.arc(0,0, 30, 0, Math.PI*2); ctx.fill();
+            ctx.shadowBlur = 0; ctx.fillStyle = "#fff";
+            ctx.beginPath(); ctx.arc(-10, -3, 8, 0, Math.PI*2); ctx.arc(10, -3, 8, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = "#000";
+            let ex = 0, ey = 0; if(keys['KeyA']) ex = -2; if(keys['KeyD']) ex = 2; if(keys['KeyW']) ey = -2; if(keys['KeyS']) ey = 2;
+            ctx.beginPath(); ctx.arc(-10 + ex, -3 + ey, 4, 0, Math.PI*2); ctx.arc(10 + ex, -3 + ey, 4, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+
+            bullets.forEach(b => { ctx.fillStyle = "white"; ctx.fillRect(b.x*80+35, b.y*80+38, 12, 5); });
+
+            ctx.restore();
+            if(keys['Space'] && !player.dead && !transitioning) shoot();
+            update();
+            requestAnimationFrame(draw);
+        }
+
+        window.addEventListener('keydown', e => { 
+            keys[e.code] = true; 
+            if (e.code === 'KeyE') useHolyWater(); 
+        });
+        window.addEventListener('keyup', e => keys[e.code] = false);
+        draw();
+    </script>
+</body>
+</html>

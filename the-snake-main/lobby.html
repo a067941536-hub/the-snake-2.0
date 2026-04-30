@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>蛇族幻想 - 冒險者村莊</title>
+    <style>
+        :root { --gold: #d4af37; --wood: #3e2723; --grass: #1b5e20; --hp-green: #2ecc71; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; color: #fff; font-family: "Noto Serif TC", serif; }
+        #gameCanvas { display: block; }
+        #ui-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        
+        #location-tag {
+            position: absolute; top: 40px; left: 40px;
+            background: rgba(0,0,0,0.8);
+            border-left: 5px solid var(--gold);
+            padding: 15px 30px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #location-tag h2 { margin: 0; font-size: 24px; color: var(--gold); letter-spacing: 4px; }
+
+        #dialogue-window {
+            position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+            width: 85%; max-width: 900px; height: 140px;
+            background: rgba(10, 10, 15, 0.95);
+            border: 2px solid #fff; padding: 25px; display: none; pointer-events: auto;
+        }
+        #speaker-name { color: var(--gold); font-size: 20px; font-weight: bold; margin-bottom: 10px; display: block; }
+        #dialogue-content { font-size: 18px; line-height: 1.6; color: #eee; }
+
+        #controls-hint { position: absolute; bottom: 20px; right: 20px; font-size: 12px; color: rgba(255,255,255,0.4); }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="ui-overlay">
+        <div id="location-tag">
+            <h2>起始之里：聖泉大廳</h2>
+            <span style="color: #888; font-size: 12px;">BEGINNER'S SANCTUARY</span>
+        </div>
+
+        <div id="dialogue-window">
+            <span id="speaker-name"></span>
+            <div id="dialogue-content"></div>
+            <div style="position: absolute; bottom: 15px; right: 20px; color: var(--gold); font-size: 12px;">按 [空白鍵] 繼續</div>
+        </div>
+
+        <div id="controls-hint">WASD 移動 | SPACE 互動</div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const config = {
+            tileSize: 80,
+            playerSpeed: 0.05,
+            mapWidth: 30,
+            mapHeight: 18
+        };
+
+        const player = { x: 5, y: 9 };
+        const keys = {};
+        let isDialoguing = false;
+
+        const gameMap = Array.from({ length: config.mapHeight }, () => Array(config.mapWidth).fill(0));
+        for(let i=0; i<config.mapWidth; i++) { gameMap[0][i] = 1; gameMap[config.mapHeight-1][i] = 1; }
+        for(let i=0; i<config.mapHeight; i++) { gameMap[i][0] = 1; gameMap[i][config.mapWidth-1] = 1; }
+        
+        // 內部牆壁
+        for(let i=1; i<8; i++) gameMap[i][15] = 1; 
+        for(let i=10; i<17; i++) gameMap[i][15] = 1;
+
+        const npcs = [
+            { x: 8, y: 9, name: "村長 亞伯", type: "priest", text: "勇者，踏入右方的黃金光陣，即可前往試煉之地。" },
+            { x: 18, y: 5, name: "守衛 凱恩", type: "guard", text: "前面的路已經開放了，快去證明你的實力吧！" },
+            { x: 22, y: 13, name: "村民 小翠", type: "villager", text: "祝你一路平安，別被蛇咬到中毒了！" }
+        ];
+
+        function drawPlayer(ctx, x, y) {
+            ctx.save();
+            ctx.translate(x * 80 + 40, y * 80 + 40);
+            const breathe = Math.sin(Date.now() / 300) * 2;
+            ctx.shadowBlur = 15; ctx.shadowColor = "#2ecc71";
+            ctx.fillStyle = "#2ecc71";
+            ctx.beginPath(); ctx.arc(0, breathe, 25, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = "#fff"; 
+            ctx.beginPath(); ctx.arc(-8, -5+breathe, 5, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(8, -5+breathe, 5, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = "#000";
+            ctx.beginPath(); ctx.arc(-8, -5+breathe, 2.5, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(8, -5+breathe, 2.5, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+
+        function drawNPC(ctx, npc) {
+            ctx.save();
+            ctx.translate(npc.x * 80 + 40, npc.y * 80 + 40);
+            const breathe = Math.sin(Date.now() / 350) * 1.5;
+            ctx.fillStyle = "rgba(0,0,0,0.3)";
+            ctx.beginPath(); ctx.ellipse(0, 30, 20, 10, 0, 0, Math.PI*2); ctx.fill();
+
+            if (npc.type === "priest") {
+                ctx.fillStyle = "#8e44ad"; 
+                ctx.beginPath(); ctx.moveTo(0, -48+breathe); ctx.lineTo(30, 10); ctx.lineTo(-30, 10); ctx.closePath(); ctx.fill();
+                ctx.fillStyle = "#d4af37"; ctx.fillRect(-35, 8, 70, 5);
+                ctx.fillStyle = "#ffdbac"; ctx.beginPath(); ctx.arc(0, -20+breathe, 14, 0, Math.PI*2); ctx.fill();
+            } else if (npc.type === "guard") {
+                ctx.fillStyle = "#2c3e50"; ctx.fillRect(-22, -10+breathe, 44, 50);
+                ctx.fillStyle = "#c0392b"; ctx.fillRect(-28, -15+breathe, 15, 12); ctx.fillRect(13, -15+breathe, 15, 12);
+                ctx.fillStyle = "#ffdbac"; ctx.beginPath(); ctx.arc(0, -22+breathe, 15, 0, Math.PI*2); ctx.fill();
+            } else {
+                ctx.fillStyle = "#e67e22"; ctx.beginPath(); ctx.arc(0, 10+breathe, 22, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = "#ffdbac"; ctx.beginPath(); ctx.arc(0, -15+breathe, 14, 0, Math.PI*2); ctx.fill();
+            }
+            ctx.restore();
+        }
+
+        function update() {
+            if (isDialoguing) return;
+            let mx = 0, my = 0;
+            if (keys['KeyW']) my -= config.playerSpeed;
+            if (keys['KeyS']) my += config.playerSpeed;
+            if (keys['KeyA']) mx -= config.playerSpeed;
+            if (keys['KeyD']) mx += config.playerSpeed;
+
+            // 碰撞檢測增加緩衝
+            const nextX = player.x + mx;
+            const nextY = player.y + my;
+            if (gameMap[Math.floor(nextY + 0.5)][Math.floor(nextX + 0.5)] !== 1) {
+                player.x = nextX;
+                player.y = nextY;
+            }
+
+            // --- 修正：傳送點判定 (往左移一點，避開最右邊的牆) ---
+            if (player.x > 27.5) {
+                window.location.href = 'teach.html';
+            }
+            camera.update();
+        }
+
+        const camera = {
+            x: 0, y: 0,
+            update: function() {
+                this.x = (player.x * 80) - (canvas.width / 2);
+                this.y = (player.y * 80) - (canvas.height / 2);
+            }
+        };
+
+        window.addEventListener('keydown', e => {
+            keys[e.code] = true;
+            if(e.code === 'Space') handleInteraction();
+        });
+        window.addEventListener('keyup', e => keys[e.code] = false);
+
+        function handleInteraction() {
+            if(isDialoguing) {
+                isDialoguing = false;
+                document.getElementById('dialogue-window').style.display = 'none';
+            } else {
+                const target = npcs.find(n => Math.hypot(player.x - n.x, player.y - n.y) < 1.5);
+                if(target) {
+                    isDialoguing = true;
+                    document.getElementById('speaker-name').innerText = target.name;
+                    document.getElementById('dialogue-content').innerText = target.text;
+                    document.getElementById('dialogue-window').style.display = 'block';
+                }
+            }
+        }
+
+        function draw() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.save();
+            ctx.translate(-camera.x, -camera.y);
+
+            for (let r = 0; r < config.mapHeight; r++) {
+                for (let c = 0; c < config.mapWidth; c++) {
+                    const dx = c * 80, dy = r * 80;
+                    if (gameMap[r][c] === 1) {
+                        ctx.fillStyle = '#1a1a1a'; ctx.fillRect(dx, dy, 80, 80);
+                        ctx.strokeStyle = '#333'; ctx.strokeRect(dx+4, dy+4, 72, 72);
+                    } else {
+                        ctx.fillStyle = '#0d0d0d'; ctx.fillRect(dx, dy, 80, 80);
+                        ctx.strokeStyle = '#151515'; ctx.strokeRect(dx, dy, 80, 80);
+                    }
+                }
+            }
+
+            // --- 修正：傳送點視覺 (移到 28 格，不靠牆) ---
+            const portalX = 28 * 80;
+            const portalY = 9 * 80;
+            ctx.save();
+            ctx.shadowBlur = 40; ctx.shadowColor = "gold";
+            ctx.fillStyle = "rgba(212, 175, 55, 0.4)";
+            ctx.beginPath();
+            ctx.arc(portalX + 40, portalY + 40, 50, 0, Math.PI*2);
+            ctx.fill();
+            ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.setLineDash([5, 15]); ctx.stroke();
+            ctx.restore();
+
+            npcs.forEach(n => drawNPC(ctx, n));
+            drawPlayer(ctx, player.x, player.y);
+            
+            ctx.restore();
+            update();
+            requestAnimationFrame(draw);
+        }
+        draw();
+    </script>
+</body>
+</html>

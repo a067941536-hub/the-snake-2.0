@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+
+<html lang="zh-Hant">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <title>蛇族幻想 - 第五關：英雄覺醒</title>
+
+    <style>
+
+        :root { --gold: #d4af37; --hp-green: #2ecc71; --cyan: #00f2ff; }
+
+        body, html { margin: 0; padding: 0; background: #000; overflow: hidden; font-family: "Noto Serif TC", serif; }
+
+        canvas { display: block; }
+
+       
+
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+
+       
+
+        /* 小地圖 */
+
+        #minimap-container { position: absolute; top: 20px; left: 20px; width: 120px; height: 120px; border: 2px solid var(--gold); background: rgba(0,0,0,0.8); pointer-events: auto; }
+
+        #minimap { width: 100%; height: 100%; }
+
+        #floor-tag { position: absolute; bottom: -22px; width: 100%; text-align: center; color: var(--gold); font-size: 12px; font-weight: bold; }
+
+
+
+        /* 角色狀態 */
+
+        .status-window { position: absolute; background: rgba(0, 0, 0, 0.85); border: 2px solid #fff; padding: 12px; color: #fff; box-shadow: 0 0 15px rgba(0,0,0,0.8); }
+
+        #player-status { top: 20px; right: 20px; width: 220px; border-right: 5px solid var(--hp-green); text-align: right; }
+
+        #inventory-status { top: 120px; right: 20px; width: 140px; border-right: 5px solid var(--gold); text-align: right; }
+
+       
+
+        .hp-bar-bg { width: 100%; height: 12px; background: #333; margin-top: 8px; border: 1px solid #555; overflow: hidden; }
+
+        #player-hp-fill { height: 100%; background: var(--hp-green); transition: 0.3s; width: 100%; }
+
+        .awakened-hp { box-shadow: 0 0 15px var(--gold); background: var(--gold) !important; }
+
+
+
+        /* 對話框 */
+
+        #dialogue-box {
+
+            position: absolute; bottom: 50px; left: 50%; transform: translateX(-50%);
+
+            width: 75%; background: rgba(0, 0, 0, 0.95); border: 2px solid var(--gold);
+
+            padding: 25px; color: #fff; font-size: 22px; display: none; pointer-events: auto;
+
+        }
+
+
+
+        /* 覺醒動畫 */
+
+        #weapon-unlock {
+
+            position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%);
+
+            color: var(--gold); text-align: center; z-index: 200; display: none; width: 90%;
+
+        }
+
+        #weapon-name { font-size: 34px; line-height: 1.6; color: #fff; text-shadow: 0 0 20px red; animation: weapon-mega-glow 2s infinite; }
+
+        @keyframes weapon-mega-glow { 0%, 100% { transform: scale(1); filter: drop-shadow(0 0 10px red); } 50% { transform: scale(1.05); filter: drop-shadow(0 0 40px var(--gold)); } }
+
+    </style>
+
+</head>
+
+<body>
+
+
+
+    <canvas id="gameCanvas"></canvas>
+
+
+
+    <div id="ui-layer">
+
+        <div id="minimap-container">
+
+            <canvas id="minimap" width="120" height="120"></canvas>
+
+            <div id="floor-tag">最終試煉：覺醒祭壇</div>
+
+        </div>
+
+
+
+        <div id="player-status" class="status-window">
+
+            <div style="font-size: 16px; font-weight: bold;">冒險者 HP</div>
+
+            <div class="hp-bar-bg"><div id="player-hp-fill"></div></div>
+
+        </div>
+
+
+
+        <div id="inventory-status" class="status-window">
+
+            <div style="font-size: 14px; color: var(--gold);">聖水🧪 x <span id="potion-count">0</span></div>
+
+            <div style="font-size: 10px; color: #aaa; margin-top: 4px;">準備迎戰終焉</div>
+
+        </div>
+
+
+
+        <div id="dialogue-box" onclick="nextDialogue()">
+
+            <div id="npc-name" style="color:var(--gold); font-weight:bold; margin-bottom:10px;">守護者・阿爾法</div>
+
+            <div id="dialogue-text">...</div>
+
+            <div style="font-size: 14px; color: #666; margin-top: 15px;">(按 Space 或點擊繼續)</div>
+
+        </div>
+
+    </div>
+
+
+
+    <div id="weapon-unlock">
+
+        <div style="font-size: 20px; color:#fff; letter-spacing:8px; margin-bottom:15px;">--- 神 兵 覺 醒 ---</div>
+
+        <h1 id="weapon-name"></h1>
+
+    </div>
+
+
+
+    <script>
+
+        const canvas = document.getElementById('gameCanvas');
+
+        const ctx = canvas.getContext('2d');
+
+        const mCanvas = document.getElementById('minimap');
+
+        const mCtx = mCanvas.getContext('2d');
+
+
+
+        const GOD_WEAPON = "【極限毀滅・煌星斷罪之天震・九天十地無間斷獄・終焉黃昏・真神覺醒之弓・零式】";
+
+
+
+        const config = { tileSize: 80, playerSpeed: 0.05, bulletSpeed: 0.3, bulletLife: 100, shootCooldown: 300 };
+
+        // 繼承前關聖水
+
+        let savedData = JSON.parse(localStorage.getItem('rpg_save')) || { potions: 5 };
+
+        const player = {
+
+            x: 5, y: 15, hp: 100, maxHp: 100, potions: savedData.potions,
+
+            isAwakened: false, alive: true, canMove: true, color: "#2ecc71",
+
+            lastShootTime: 0
+
+        };
+
+
+
+        const npc = { x: 20, y: 15 };
+
+        // 場景物件：發光石柱與聖水堆
+
+        const props = [
+
+            {x: 15, y: 10, type: 'pillar'}, {x: 25, y: 10, type: 'pillar'},
+
+            {x: 15, y: 20, type: 'pillar'}, {x: 25, y: 20, type: 'pillar'},
+
+            {x: 20, y: 12, type: 'chest', active: true}, {x: 20, y: 18, type: 'chest', active: true}
+
+        ];
+
+
+
+        // 子彈陣列
+
+        let bullets = [];
+
+
+
+        const dialogues = [
+
+            "穿過無數毒蛇的包圍，冒險者...你證明了你的意志。",
+
+            "但那把舊弓已無法承受即將到來的虛空神力。",
+
+            "拿走這裡所有的聖水吧，這是我最後能給予你的物資補給。",
+
+            "現在，站到祭壇中心，向遠古的英靈祈禱...",
+
+            "我將為你解放最終咒式——讓諸神也為之戰慄的姿態！",
+
+            "去吧！用這把神兵，洗刷這世界的絕望！(按 Space 射擊試試)"
+
+        ];
+
+       
+
+        let currentDiag = -1;
+
+        let isDialogueActive = false;
+
+        let portalOpen = false;
+
+
+
+        const mapW = 40, mapH = 30;
+
+        const map = Array.from({length: mapH}, () => Array(mapW).fill(0));
+
+        // 邊界牆
+
+        for(let i=0; i<mapW; i++) { map[0][i]=1; map[mapH-1][i]=1; }
+
+        for(let i=0; i<mapH; i++) { map[i][0]=1; map[i][mapW-1]=1; }
+
+
+
+        function drawPlayer(ctx, x, y) {
+
+            ctx.save();
+
+            ctx.translate(x * 80 + 40, y * 80 + 40);
+
+            if(player.isAwakened) {
+
+                ctx.shadowBlur = 40; ctx.shadowColor = "gold";
+
+                const s = 1 + Math.sin(Date.now()/150)*0.08; ctx.scale(s, s);
+
+            } else { ctx.shadowBlur = 15; ctx.shadowColor = player.color; }
+
+            ctx.fillStyle = player.color;
+
+            ctx.beginPath(); ctx.arc(0, 0, 25, 0, Math.PI*2); ctx.fill();
+
+            ctx.fillStyle = "#fff"; // 白眼
+
+            ctx.beginPath(); ctx.arc(-8, -5, 5, 0, Math.PI*2); ctx.fill();
+
+            ctx.beginPath(); ctx.arc(8, -5, 5, 0, Math.PI*2); ctx.fill();
+
+            ctx.fillStyle = "#000"; // 黑瞳
+
+            ctx.beginPath(); ctx.arc(-8, -5, 2.5, 0, Math.PI*2); ctx.fill();
+
+            ctx.beginPath(); ctx.arc(8, -5, 2.5, 0, Math.PI*2); ctx.fill();
+
+            ctx.restore();
+
+        }
+
+
+
+        function update() {
+
+            if (!player.canMove) return;
+
+            let mx = 0, my = 0;
+
+            if (keys['KeyW']) my -= config.playerSpeed; if (keys['KeyS']) my += config.playerSpeed;
+
+            if (keys['KeyA']) mx -= config.playerSpeed; if (keys['KeyD']) mx += config.playerSpeed;
+
+           
+
+            if (map[Math.floor(player.y + my)][Math.floor(player.x)] !== 1) player.y += my;
+
+            if (map[Math.floor(player.y)][Math.floor(player.x + mx)] !== 1) player.x += mx;
+
+
+
+            // 拾取補給
+
+            props.forEach(p => {
+
+                if(p.type === 'chest' && p.active && Math.hypot(player.x - p.x, player.y - p.y) < 1) {
+
+                    p.active = false;
+
+                    player.potions = 99; // 補給到爆
+
+                    player.hp = player.maxHp;
+
+                }
+
+            });
+
+
+
+            if(portalOpen && player.x > 38.5) {
+
+                localStorage.setItem('rpg_save', JSON.stringify({ potions: player.potions }));
+
+                window.location.href = 'sixth.html';
+
+            }
+
+            updateBullets();
+
+            updateUI();
+
+        }
+
+
+
+        // 更新子彈邏輯
+
+        function updateBullets() {
+
+            bullets.forEach((b, index) => {
+
+                b.x += b.vx;
+
+                b.y += b.vy;
+
+                b.life--;
+
+                // 碰到牆壁
+
+                if (map[Math.floor(b.y)] && map[Math.floor(b.y)][Math.floor(b.x)] === 1) b.life = 0;
+
+                if (b.life <= 0) bullets.splice(index, 1);
+
+            });
+
+        }
+
+
+
+        // 自由射擊 (空射)
+
+        function shoot() {
+
+            const now = Date.now();
+
+            if (now - player.lastShootTime < config.shootCooldown) return;
+
+            player.lastShootTime = now;
+
+
+
+            const bullet = {
+
+                x: player.x,
+
+                y: player.y,
+
+                vx: config.bulletSpeed, // 預設向右
+
+                vy: 0,
+
+                life: config.bulletLife,
+
+                isAwakened: player.isAwakened
+
+            };
+
+            bullets.push(bullet);
+
+        }
+
+
+
+        function updateUI() {
+
+            const hpf = document.getElementById('player-hp-fill');
+
+            hpf.style.width = (player.hp / player.maxHp * 100) + "%";
+
+            if(player.isAwakened) hpf.classList.add('awakened-hp');
+
+            document.getElementById('potion-count').innerText = player.potions;
+
+            drawMinimap();
+
+        }
+
+
+
+        function drawMinimap() {
+
+            mCtx.fillStyle = "black"; mCtx.fillRect(0,0,120,120);
+
+            const s = 120/mapW;
+
+            mCtx.fillStyle = "#333";
+
+            for(let r=0; r<mapH; r++) for(let c=0; c<mapW; c++) if(map[r][c]===1) mCtx.fillRect(c*s, r*s, s, s);
+
+            mCtx.fillStyle = "white"; mCtx.fillRect(npc.x*s, npc.y*s, s*2, s*2);
+
+            mCtx.fillStyle = player.color; mCtx.fillRect(player.x*s, player.y*s, s*2, s*2);
+
+        }
+
+
+
+        function startDialogue() {
+
+            isDialogueActive = true; player.canMove = false;
+
+            currentDiag = 0;
+
+            document.getElementById('dialogue-box').style.display = 'block';
+
+            document.getElementById('dialogue-text').innerText = dialogues[currentDiag];
+
+        }
+
+
+
+        function nextDialogue() {
+
+            if (!isDialogueActive) return;
+
+            currentDiag++;
+
+            if (currentDiag < dialogues.length) {
+
+                document.getElementById('dialogue-text').innerText = dialogues[currentDiag];
+
+            } else {
+
+                isDialogueActive = false;
+
+                document.getElementById('dialogue-box').style.display = 'none';
+
+                triggerAwakening();
+
+            }
+
+        }
+
+
+
+        function triggerAwakening() {
+
+            player.isAwakened = true; player.color = "#d4af37";
+
+            player.maxHp = 999; player.hp = 999;
+
+            const wu = document.getElementById('weapon-unlock');
+
+            document.getElementById('weapon-name').innerText = GOD_WEAPON;
+
+            wu.style.display = 'block';
+
+            setTimeout(() => {
+
+                wu.style.opacity = '0'; wu.style.transition = '3s';
+
+                player.canMove = true; portalOpen = true;
+
+            }, 5000);
+
+        }
+
+
+
+        const keys = {};
+
+        window.addEventListener('keydown', e => {
+
+            keys[e.code] = true;
+
+            if (e.code === 'Space') {
+
+                if (!isDialogueActive && Math.hypot(player.x - npc.x, player.y - npc.y) < 1.5 && currentDiag === -1) startDialogue();
+
+                else if (isDialogueActive) nextDialogue();
+
+                else if (player.canMove) shoot(); // 如果沒有在對話且可以移動，就射擊
+
+            }
+
+        });
+
+        window.addEventListener('keyup', e => keys[e.code] = false);
+
+
+
+        function draw() {
+
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+
+            const camX = player.x * 80 - canvas.width / 2, camY = player.y * 80 - canvas.height / 2;
+
+            const time = Date.now() / 1000;
+
+            ctx.save(); ctx.translate(-camX, -camY);
+
+
+
+            // 繪製場景
+
+            for(let r=0; r<mapH; r++) for(let c=0; c<mapW; c++) {
+
+                const x = c*80, y = r*80;
+
+                ctx.fillStyle = (map[r][c] === 1) ? '#1e272e' : '#080510';
+
+                ctx.fillRect(x, y, 80, 80);
+
+                if(map[r][c]===0 && (c+r)%4===0) {
+
+                    ctx.strokeStyle = '#1a1a2a'; ctx.lineWidth = 1; ctx.strokeRect(x+10, y+10, 60, 60);
+
+                }
+
+            }
+
+
+
+            // 繪製裝飾與補給
+
+            props.forEach(p => {
+
+                const px = p.x*80+40, py = p.y*80+40;
+
+                if(p.type === 'pillar') {
+
+                    ctx.fillStyle = '#2c3e50'; ctx.fillRect(px-30, py-100, 60, 150);
+
+                    ctx.shadowBlur = 20; ctx.shadowColor = "cyan";
+
+                    ctx.fillStyle = "cyan"; ctx.fillRect(px-25, py-90, 50, 10); ctx.shadowBlur = 0;
+
+                } else if(p.type === 'chest' && p.active) {
+
+                    ctx.shadowBlur = 15; ctx.shadowColor = "lime";
+
+                    ctx.fillStyle = "#d4af37"; ctx.fillRect(px-30, py-20, 60, 40);
+
+                    ctx.fillStyle = "lime"; ctx.beginPath(); ctx.arc(px, py-5, 10, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur = 0;
+
+                }
+
+            });
+
+
+
+            // 繪製子彈
+
+            bullets.forEach(b => {
+
+                ctx.save();
+
+                ctx.translate(b.x * 80 + 40, b.y * 80 + 40);
+
+                if (b.isAwakened) {
+
+                    // --- 煌星斷罪炫泡子彈 ---
+
+                    ctx.shadowBlur = 25; ctx.shadowColor = "gold";
+
+                    // 拖尾殘影
+
+                    ctx.fillStyle = "rgba(255, 215, 0, 0.3)";
+
+                    ctx.fillRect(-50, -3, 50, 6);
+
+                    // 旋轉十字星
+
+                    ctx.rotate(time * 10);
+
+                    ctx.fillStyle = "#fff"; ctx.fillRect(-18, -2, 36, 4); ctx.fillRect(-2, -18, 4, 36);
+
+                    // 中心核心
+
+                    ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill();
+
+                } else {
+
+                    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();
+
+                }
+
+                ctx.restore();
+
+            });
+
+
+
+            // NPC 祭壇特效
+
+            const nx = npc.x*80+40, ny = npc.y*80+40;
+
+            ctx.strokeStyle = "rgba(0, 242, 255, 0.5)"; ctx.lineWidth = 3;
+
+            ctx.beginPath(); ctx.arc(nx, ny, 100 + Math.sin(time*2)*10, 0, Math.PI*2); ctx.stroke();
+
+           
+
+            ctx.shadowBlur = 50; ctx.shadowColor = "white";
+
+            ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(nx, ny, 35, 0, Math.PI*2); ctx.fill();
+
+            ctx.shadowBlur = 0;
+
+
+
+            drawPlayer(ctx, player.x, player.y);
+
+
+
+            if(portalOpen) {
+
+                ctx.shadowBlur = 100; ctx.shadowColor = "gold";
+
+                ctx.fillStyle = "rgba(212, 175, 55, 0.4)";
+
+                ctx.beginPath(); ctx.arc(39*80, 15*80, 200, 0, Math.PI*2); ctx.fill();
+
+            }
+
+
+
+            ctx.restore();
+
+            update();
+
+            requestAnimationFrame(draw);
+
+        }
+
+        draw();
+
+    </script>
+
+</body>
+
+</html>

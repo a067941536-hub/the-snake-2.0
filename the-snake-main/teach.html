@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>蛇族幻想 - 試煉：中毒與解毒 (Full Restored)</title>
+    <style>
+        :root { --hp-green: #2ecc71; --hp-red: #e74c3c; --dq-blue: #004488; --gold: #d4af37; --poison-purple: #9b59b6; }
+        body, html { margin: 0; padding: 0; background: #000; overflow: hidden; font-family: "Noto Serif TC", serif; }
+        canvas { display: block; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        #minimap-container { position: absolute; top: 20px; left: 20px; width: 120px; height: 120px; border: 2px solid #fff; background: rgba(0,0,0,0.8); }
+        #minimap { width: 100%; height: 100%; }
+        #floor-tag { position: absolute; bottom: -22px; width: 100%; text-align: center; color: var(--gold); font-size: 12px; font-weight: bold; }
+        .status-window { position: absolute; background: rgba(0, 0, 0, 0.85); border: 2px solid #fff; padding: 12px; color: #fff; box-shadow: 0 0 15px rgba(0,0,0,0.8); }
+        #player-status { top: 20px; right: 20px; width: 220px; border-right: 5px solid var(--hp-green); text-align: right; }
+        #inventory-status { top: 120px; right: 20px; width: 140px; border-right: 5px solid var(--gold); text-align: right; }
+        #enemy-status { top: 200px; right: 20px; width: 220px; border-right: 5px solid var(--hp-red); display: none; }
+        .status-icon { display: inline-block; width: 20px; height: 20px; border-radius: 50%; margin-left: 5px; vertical-align: middle; }
+        #poison-dot { background: var(--poison-purple); box-shadow: 0 0 10px var(--poison-purple); display: none; }
+        #death-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(60, 0, 0, 0.85); display: none; flex-direction: column; align-items: center; justify-content: center; pointer-events: auto; z-index: 100; }
+        .death-btn { padding: 15px 40px; background: #fff; border: none; cursor: pointer; font-size: 20px; font-weight: bold; margin-top: 20px; transition: 0.2s; }
+        .hp-bar-bg { width: 100%; height: 12px; background: #333; margin-top: 8px; border: 1px solid #555; overflow: hidden; }
+        .hp-fill { height: 100%; background: var(--hp-green); transition: 0.3s; }
+        #dialogue-box { position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); width: 70%; background: var(--dq-blue); border: 3px solid #fff; padding: 20px; display: none; pointer-events: auto; }
+        #dialogue-text { color: #fff; font-size: 20px; line-height: 1.6; }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="ui-layer">
+        <div id="minimap-container">
+            <canvas id="minimap" width="120" height="120"></canvas>
+            <div id="floor-tag">試煉：聖泉入口</div>
+        </div>
+        <div id="player-status" class="status-window">
+            <div style="font-size: 16px; font-weight: bold;">冒險者 HP <span id="poison-dot" class="status-icon"></span></div>
+            <div class="hp-bar-bg"><div id="player-hp-fill" class="hp-fill"></div></div>
+        </div>
+        <div id="inventory-status" class="status-window">
+            <div style="font-size: 14px; color: #d4af37;">聖水🧪 x <span id="potion-count">0</span></div>
+            <div style="font-size: 10px; color: #aaa; margin-top: 4px;">按 [ E ] 解毒/補血</div>
+        </div>
+        <div id="enemy-status" class="status-window">
+            <div style="font-size: 16px; font-weight: bold; color: var(--hp-red);">青鱗巨蛇 HP</div>
+            <div class="hp-bar-bg"><div id="enemy-hp-fill" class="hp-fill" style="background: var(--hp-red);"></div></div>
+        </div>
+        <div id="dialogue-box">
+            <div id="dialogue-text"></div>
+            <div style="text-align:right; color:#d4af37; font-size:14px; margin-top:10px;">▼ 按 [空白鍵] 繼續</div>
+        </div>
+        <div id="death-screen">
+            <h1 style="color:#fff; font-size: 50px;">你倒下了...</h1>
+            <button class="death-btn" onclick="respawn()">回到起點 (保留裝備)</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const miniCanvas = document.getElementById('minimap');
+        const mctx = miniCanvas.getContext('2d');
+
+        const config = { tileSize: 80, playerSpeed: 0.05, baseArrowSpeed: 0.3, shootCooldown: 400 };
+        let isChangingScene = false;
+        let savedData = JSON.parse(localStorage.getItem('rpg_save')) || { potions: 0 };
+
+        const player = { 
+            x: 5, y: 15, hp: 100, maxHp: 100, 
+            potions: savedData.potions, lastShootTime: 0, 
+            isInvulnerable: false, alive: true,
+            poisoned: false, poisonInterval: null 
+        };
+        const snake = { 
+            x: 32, y: 15, hp: 300, maxHp: 300, 
+            active: false, alive: true, 
+            isHit: false, stunned: false, 
+            stunTimer: null, bodyParts: [] 
+        };
+        for(let i=0; i<12; i++) { snake.bodyParts.push({x: 32+i, y: 15}); }
+
+        const npc = { x: 7, y: 15 };
+        const arrows = [];
+        const keys = {};
+        let isDialoguing = false, portalOpen = false;
+
+        const mapW = 40, mapH = 30;
+        const map = Array.from({length: mapH}, () => Array(mapW).fill(0));
+        function addWall(x, y, w, h) { for(let i=y; i<y+h; i++) for(let j=x; j<x+w; j++) if(i < mapH && j < mapW) map[i][j] = 1; }
+        for(let i=0; i<mapW; i++) { map[0][i]=1; map[mapH-1][i]=1; }
+        for(let i=0; i<mapH; i++) { map[i][0]=1; map[i][mapW-1]=1; }
+        addWall(15, 8, 2, 14); addWall(25, 8, 2, 14); addWall(18, 14, 6, 2); 
+        map[5][5] = 3; map[5][35] = 3; map[25][5] = 3; map[25][35] = 3;
+
+        function drawPlayer(ctx, x, y) {
+            ctx.save();
+            ctx.translate(x * 80 + 40, y * 80 + 40);
+            if(player.isInvulnerable || (player.poisoned && Math.floor(Date.now()/200)%2)) {
+                ctx.globalAlpha = 0.5;
+                if(player.poisoned) { ctx.shadowBlur = 20; ctx.shadowColor = "#9b59b6"; }
+            } else { ctx.shadowBlur = 15; ctx.shadowColor = "#2ecc71"; }
+            ctx.fillStyle = "#2ecc71"; ctx.beginPath(); ctx.arc(0, 0, 25, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(-8, -5, 5, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(8, -5, 5, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(-8, -5, 2.5, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(8, -5, 2.5, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+
+        function drawSnake(ctx) {
+            if(!snake.alive || !snake.active) return;
+            ctx.save();
+            const time = Date.now() / 200;
+            snake.bodyParts.forEach((part, i) => {
+                const nx = part.x * 80 + 40;
+                const ny = part.y * 80 + 40 + Math.sin(time + i * 0.7) * 10;
+                const size = 35 - i * 2;
+                ctx.beginPath();
+                const grad = ctx.createRadialGradient(nx - size/3, ny - size/3, 0, nx, ny, size);
+                grad.addColorStop(0, "#5ce6dd"); grad.addColorStop(1, "#1a4d4a");
+                ctx.fillStyle = grad;
+                if(snake.stunned) { ctx.shadowBlur = 20; ctx.shadowColor = "yellow"; }
+                else if(snake.isHit) { ctx.shadowBlur = 25; ctx.shadowColor = "red"; }
+                ctx.arc(nx, ny, size, 0, Math.PI*2); ctx.fill();
+            });
+            const head = snake.bodyParts[0];
+            ctx.translate(head.x * 80 + 40, head.y * 80 + 40 + Math.sin(time) * 10);
+            if(snake.stunned) {
+                ctx.rotate(time * 6); ctx.fillStyle = "yellow"; ctx.font = "bold 45px Arial"; ctx.fillText("@_@", -40, 15);
+            } else {
+                ctx.fillStyle = "#3dc1c1"; ctx.beginPath(); ctx.ellipse(0, 0, 38, 48, 0, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = "white"; ctx.beginPath(); ctx.arc(-14, -12, 9, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(14, -12, 9, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = "red"; ctx.beginPath(); ctx.arc(-14, -12, 4, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(14, -12, 4, 0, Math.PI*2); ctx.fill();
+                ctx.strokeStyle = "red"; ctx.lineWidth = 3; ctx.beginPath();
+                ctx.moveTo(0, 35); ctx.lineTo(0, 55 + Math.sin(time*10)*5); 
+                ctx.lineTo(-8, 65); ctx.moveTo(0, 55 + Math.sin(time*10)*5); ctx.lineTo(8, 65); ctx.stroke();
+            }
+            ctx.restore();
+        }
+
+        function drawNPC(ctx, x, y) {
+            ctx.save();
+            ctx.translate(x * 80 + 40, y * 80 + 40);
+            ctx.fillStyle = "#8e44ad"; ctx.beginPath(); ctx.moveTo(0, -48); ctx.lineTo(30, -12); ctx.lineTo(-30, -12); ctx.closePath(); ctx.fill();
+            ctx.fillStyle = "#d4af37"; ctx.fillRect(-35, -14, 70, 6); 
+            ctx.fillStyle = "#2c3e50"; ctx.fillRect(-22, -10, 44, 55);
+            ctx.fillStyle = "#d4af37"; ctx.fillRect(-22, 15, 44, 4); ctx.fillRect(-22, 38, 44, 4);
+            ctx.fillStyle = "#ffdbac"; ctx.beginPath(); ctx.arc(0, -18, 14, 0, Math.PI*2); ctx.fill();
+            if(!snake.active) { ctx.fillStyle = "yellow"; ctx.font = "bold 45px Arial"; ctx.fillText("!", -8, -55); }
+            ctx.restore();
+        }
+
+        class Arrow {
+            constructor(x, y, target) {
+                this.x = x; this.y = y; this.target = target;
+                this.life = 150;
+                this.isCrit = Math.random() < 0.1;
+                this.damage = this.isCrit ? 40 : 20;
+                this.vx = config.baseArrowSpeed; this.vy = 0;
+            }
+            update() {
+                if (this.target && this.target.alive) {
+                    const dx = this.target.x - this.x, dy = this.target.y - this.y;
+                    const d = Math.hypot(dx, dy);
+                    if(d > 0) {
+                        this.vx = (dx / d) * config.baseArrowSpeed;
+                        this.vy = (dy / d) * config.baseArrowSpeed;
+                    }
+                }
+                this.x += this.vx; this.y += this.vy; this.life--;
+            }
+            draw(ctx) {
+                if(isNaN(this.x) || isNaN(this.y)) return;
+                ctx.save(); ctx.translate(this.x * 80, this.y * 80);
+                ctx.rotate(Math.atan2(this.vy, this.vx));
+                ctx.strokeStyle = this.isCrit ? "red" : "#00f2ff"; ctx.lineWidth = 3;
+                ctx.beginPath(); ctx.moveTo(-10, 0); ctx.lineTo(10, 0); ctx.stroke(); ctx.restore();
+            }
+        }
+
+        function respawn() {
+            if(player.poisonInterval) clearInterval(player.poisonInterval);
+            localStorage.setItem('rpg_save', JSON.stringify({ potions: player.potions }));
+            location.reload();
+        }
+
+        window.addEventListener('keydown', e => { keys[e.code] = true; if(e.code === 'KeyE') usePotion(); });
+        window.addEventListener('keyup', e => { if(e.code === 'Space') handleSpace(); keys[e.code] = false; });
+
+        function handleSpace() {
+            if(isChangingScene) return;
+            if(isDialoguing) {
+                isDialoguing = false; document.getElementById('dialogue-box').style.display = 'none';
+                snake.active = true; document.getElementById('enemy-status').style.display = 'block';
+            } else if(Math.hypot(player.x - npc.x, player.y - npc.y) < 1.5 && !snake.active) {
+                isDialoguing = true;
+                document.getElementById('dialogue-text').innerText = "阿福導師：Boss 就在右方！注意被咬會中毒。用聖水解毒。";
+                document.getElementById('dialogue-box').style.display = 'block';
+            } else if(player.alive && !portalOpen) { // 修復點：過關後不准射箭
+                const now = Date.now();
+                if(now - player.lastShootTime < config.shootCooldown) return;
+                arrows.push(new Arrow(player.x, player.y, snake.alive ? snake : null));
+                player.lastShootTime = now;
+            }
+        }
+
+        function usePotion() { 
+            if(player.potions > 0 && player.alive) { 
+                let used = false;
+                if(player.poisoned) { player.poisoned = false; if(player.poisonInterval) clearInterval(player.poisonInterval); used = true; }
+                else if(player.hp < player.maxHp) { player.hp = Math.min(100, player.hp + 50); used = true; }
+                if(used) { player.potions--; updateUI(); }
+            } 
+        }
+
+        function update() {
+            if (isChangingScene || isDialoguing || !player.alive) return;
+            let mx = 0, my = 0;
+            if (keys['KeyW']) my -= config.playerSpeed; if (keys['KeyS']) my += config.playerSpeed;
+            if (keys['KeyA']) mx -= config.playerSpeed; if (keys['KeyD']) mx += config.playerSpeed;
+            if (map[Math.floor(player.y + my)][Math.floor(player.x + mx)] !== 1) { player.x += mx; player.y += my; }
+            if(map[Math.floor(player.y)][Math.floor(player.x)] === 3) { player.potions++; map[Math.floor(player.y)][Math.floor(player.x)] = 0; }
+
+            if(portalOpen && player.x > 37.5) {
+                isChangingScene = true;
+                if(player.poisonInterval) clearInterval(player.poisonInterval);
+                localStorage.setItem('rpg_save', JSON.stringify({ potions: player.potions }));
+                window.location.replace("first.html");
+                return;
+            }
+
+            for(let i=arrows.length-1; i>=0; i--) {
+                let arr = arrows[i]; arr.update();
+                if(snake.alive && snake.active && Math.hypot(arr.x - snake.x, arr.y - snake.y) < 1.2) {
+                    snake.hp -= arr.damage; snake.isHit = true;
+                    if (Math.random() < 0.1) { snake.stunned = true; clearTimeout(snake.stunTimer); snake.stunTimer = setTimeout(() => { snake.stunned = false; }, 1000); }
+                    setTimeout(() => snake.isHit = false, 150);
+                    arrows.splice(i, 1);
+                    if(snake.hp <= 0) { snake.alive = false; portalOpen = true; }
+                } else if(arr.life <= 0 || map[Math.floor(arr.y)][Math.floor(arr.x)] === 1) arrows.splice(i, 1);
+            }
+
+            if (snake.active && snake.alive && !snake.stunned) {
+                const head = snake.bodyParts[0];
+                const dx = player.x - head.x, dy = player.y - head.y, dist = Math.hypot(dx, dy);
+                let speed = dist > 6 ? 0.06 : 0.03;
+                if(map[Math.floor(head.y)][Math.floor(head.x + (dx/dist)*speed)] !== 1) head.x += (dx/dist)*speed;
+                if(map[Math.floor(head.y + (dy/dist)*speed)][Math.floor(head.x)] !== 1) head.y += (dy/dist)*speed;
+                for(let i = snake.bodyParts.length - 1; i > 0; i--) {
+                    snake.bodyParts[i].x += (snake.bodyParts[i-1].x - snake.bodyParts[i].x) * 0.18;
+                    snake.bodyParts[i].y += (snake.bodyParts[i-1].y - snake.bodyParts[i].y) * 0.18;
+                }
+                snake.x = head.x; snake.y = head.y;
+                if (dist < 0.7 && !player.isInvulnerable) {
+                    player.hp -= 20; player.isInvulnerable = true;
+                    setTimeout(() => player.isInvulnerable = false, 800);
+                    if(!player.poisoned && Math.random() < 0.4) {
+                        player.poisoned = true;
+                        if(player.poisonInterval) clearInterval(player.poisonInterval);
+                        player.poisonInterval = setInterval(() => { if(player.poisoned && player.alive) { player.hp -= 3; updateUI(); if(player.hp <= 0) checkPlayerDeath(); } }, 1000);
+                    }
+                    if(player.hp <= 0) checkPlayerDeath();
+                }
+            }
+            updateUI();
+        }
+
+        function checkPlayerDeath() {
+            if(player.hp <= 0 && player.alive) {
+                player.hp = 0; player.alive = false; player.poisoned = false;
+                if(player.poisonInterval) clearInterval(player.poisonInterval);
+                document.getElementById('death-screen').style.display = 'flex';
+                updateUI();
+            }
+        }
+
+        function updateUI() {
+            const hpf = document.getElementById('player-hp-fill');
+            if(hpf) { hpf.style.width = player.hp + "%"; hpf.style.background = player.poisoned ? "var(--poison-purple)" : "var(--hp-green)"; }
+            document.getElementById('poison-dot').style.display = player.poisoned ? "inline-block" : "none";
+            document.getElementById('enemy-hp-fill').style.width = (snake.hp / snake.maxHp * 100) + "%";
+            document.getElementById('potion-count').innerText = player.potions;
+        }
+
+        function draw() {
+            if(isChangingScene) return;
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            const camX = player.x * 80 - canvas.width / 2, camY = player.y * 80 - canvas.height / 2;
+            ctx.save(); ctx.translate(-camX, -camY);
+            for(let r=0; r<mapH; r++) for(let c=0; c<mapW; c++) {
+                const x = c*80, y = r*80;
+                if(map[r][c] === 1) { ctx.fillStyle = '#1a1111'; ctx.fillRect(x, y, 80, 80); ctx.strokeStyle='#222'; ctx.strokeRect(x+5,y+5,70,70); } 
+                else { ctx.fillStyle = '#0a0a0a'; ctx.fillRect(x, y, 80, 80); ctx.strokeStyle='#111'; ctx.strokeRect(x,y,80,80); }
+                if(map[r][c] === 3) { ctx.shadowBlur=15; ctx.shadowColor="lime"; ctx.fillStyle="lime"; ctx.beginPath(); ctx.arc(x+40,y+40,15,0,Math.PI*2); ctx.fill(); ctx.shadowBlur=0; }
+            }
+            if(portalOpen) { ctx.shadowBlur = 30; ctx.shadowColor = "cyan"; ctx.fillStyle = "rgba(0, 255, 255, 0.4)"; ctx.beginPath(); ctx.arc(38*80, 15*80, 60, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur=0; }
+            arrows.forEach(arr => arr.draw(ctx));
+            drawSnake(ctx);
+            drawNPC(ctx, npc.x, npc.y);
+            if(player.alive) drawPlayer(ctx, player.x, player.y);
+            ctx.restore(); update(); requestAnimationFrame(draw);
+        }
+        draw();
+    </script>
+</body>
+</html>
